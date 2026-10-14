@@ -1,0 +1,8 @@
+.env
+.agent_backups/
+.agent_snapshots/
+.agent_sessions/
+__pycache__/
+*.py[cod]
+*.log
+skills.md
