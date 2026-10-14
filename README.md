@@ -4,6 +4,11 @@ Termux Agent is a local coding and phone automation assistant built for Android 
 
 It connects to Gemini, Groq, Mistral, and OpenRouter, gives the model a sandboxed set of file, shell, web, and Android tools, and puts an explicit approval step in front of every file change, command, call, or message.
 
+| | | | |
+| :---: | :---: | :---: | :---: |
+| Home<br>![Home](Images/home.png) | Models<br> ![Settings 1](Images/settings1.png) | Permissions <br> ![Settings 2](Images/settings2.jpg) | Logs & Actions <br>![Settings 3](Images/settings3.jpg) |
+| Weather<br>![Weather](Images/weather.png) | Call<br>![Call](Images/call.png) | Cloning a repo<br>![Clone](Images/clone.png) | With Shizuku<br>![Apks](Images/apks.jpg) |
+
 ## Files and Layout
 
 The project only needs `termux_agent.py` and `index.html` in the same directory. On first run, it creates two folders:
