@@ -10,11 +10,6 @@ It connects to Gemini, Groq, Mistral, OpenRouter, Z.AI, BazaarLink, UnoRouter, a
 | Home<br>![Home](Images/home.png) | Models<br> ![Settings 1](Images/settings1.png) | Permissions <br> ![Settings 2](Images/settings2.jpg) | Logs & Actions <br>![Settings 3](Images/settings3.jpg) |
 | Weather<br>![Weather](Images/weather.png) | Call<br>![Call](Images/call.png) | Cloning a repo<br>![Clone](Images/clone.png) | With Shizuku<br>![Apks](Images/apks.jpg) |
 
-| | | | |
-| :---: | :---: | :---: | :---: |
-| Home<br>![Home](Images/home.png) | Models<br> ![Settings 1](Images/settings1.png) | Permissions <br> ![Settings 2](Images/settings2.jpg) | Logs & Actions <br>![Settings 3](Images/settings3.jpg) |
-| Weather<br>![Weather](Images/weather.png) | Call<br>![Call](Images/call.png) | Cloning a repo<br>![Clone](Images/clone.png) | With Shizuku<br>![Apks](Images/apks.jpg) |
-
 ## Files and Layout
 
 The project only needs `termux_agent.py` and `index.html` in the same directory. On first run, it creates two folders:
