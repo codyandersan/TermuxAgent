@@ -1,24 +1,19 @@
 #!/usr/bin/env python3
 """
-Termux Agent v3.2 - agent for Android/Termux, powered by Gemini/Groq/Mistral/OpenRouter.
-v3.2 fixes over v3.1:
+Termux Agent v3.3 - agent for Android/Termux, powered by Gemini/Groq/Mistral/OpenRouter/Z.AI/BazaarLink/UnoRouter/AIHubMix.
+v3.3 updates & fixes:
+- Updated .env template & provider pool: added ZAI (glm-4.5-flash), BAZAARLINK (glyph-cluster),
+  UNOROUTER (allam-2-7b:free), AIHUBMIX (agents-a1-free), and removed NVIDIA
+- Per-provider custom headers support (e.g. Accept-Language for Z.AI) and Cloudflare/WAF curl fallback
+- Automatic tool-less fallback for OpenAI-compatible models that reject function-calling payloads
+- Fixed silent turn error handling so provider/runtime errors surface in Web UI and CLI
+- Fixed maybe_summarize early-exit bug and role-alternation safety in window() and summarization
 - Unified diff parser supports standard hunk headers with function names
-- Safe parameter parsing (try/except) for numeric and JSON tool arguments
-- Shell commands now block access to BLOCKED_DIRS and BLOCKED_BASENAMES
+- Safe parameter parsing (try/except) for numeric, dict, and JSON tool arguments
+- Shell commands block access to BLOCKED_DIRS and BLOCKED_BASENAMES
 - Shizuku (rish) commands are unwrapped and inspected for safety bypasses
-- Auto-fix loop now tracks all files touched in the entire turn, not just the last step
-- 15-second backoff retry logic fixed (removed premature loop break)
-- Git checkpoints now use a shadow repo in ~/.config/termux_agent to keep projects clean
-- Backup pruning added (2 days for sessions/snapshots, 7 days for shadow repos)
-- CLI /dry crash fixed (global DRY_RUN)
-- Call/SMS no longer auto-dial when /yolo is active
-- Clipboard access requires explicit approval
-- Unstructured uploads use a dedicated "upload" approval category
-- Provider rotation counts turns, not individual tool calls
-- Phone numbers and emails are redacted from file contents
-- SIGHUP handled for graceful terminal closure
-- Rate limiting added for TTS and notifications
-- Pinned context capped at 10k chars to prevent context exhaustion
+- Auto-fix loop tracks all files touched in the entire turn, not just the last step
+- Git checkpoints use a shadow repo in ~/.config/termux_agent to keep projects clean
 """
 import atexit
 import copy
@@ -102,8 +97,19 @@ WEB = None
 ENV_PATH = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 ENV = {}
 ENV_TEMPLATE = (
-    "GEMINI_PRO_1=\nGEMINI_PRO_2=\nGEMINI_FREE_1=\nGEMINI_FREE_2=\n"
-    "MISTRAL=\nGROQ=\nOPENROUTER=\nNVIDIA=\nTAVILY=\nUNSTRUCTURED=\n"
+    "GEMINI_PRO_1=\n"
+    "GEMINI_PRO_2=\n"
+    "GEMINI_FREE_1=\n"
+    "GEMINI_FREE_2=\n"
+    "MISTRAL=\n"
+    "GROQ=\n"
+    "OPENROUTER=\n"
+    "ZAI=\n"
+    "BAZAARLINK=\n"
+    "UNOROUTER=\n"
+    "AIHUBMIX=\n"
+    "TAVILY=\n"
+    "UNSTRUCTURED=\n"
 )
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
@@ -129,11 +135,10 @@ SECRET_PATTERNS = [
     r"hf_[A-Za-z0-9]{20,}",
     r"ghp_[A-Za-z0-9]{30,}",
     r"xox[baprs]-[A-Za-z0-9-]{10,}",
-    r"nvidia-[A-Za-z0-9_-]{20,}",
     r"sk-or-v1-[A-Za-z0-9]{20,}",
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
     r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b",  # Emails
-    r"(?<!\w)(?:\+\d{1,3}[-.\s]?\(?\d{1,4}\)?[-.\s]?\d{3,5}[-.\s]?\d{4,5}|(?:\+?\d{1,3}[-.\s])?(?:\(\d{3}\)[-.\s]?|\d{3}[-.\s])\d{3}[-.\s]\d{4})\b", # Phones
+    r"(?<!\w)(?:\+\d{1,3}[-.\s]?\(?\d{1,4}\)?[-.\s]?\d{3,5}[-.\s]?\d{4,5}|(?:\+?\d{1,3}[-.\s])?(?:\(\d{3}\)[-.\s]?|\d{3}[-.\s])\d{3}[-.\s]\d{4})\b",  # Phones
 ]
 
 UNTRUSTED_TOOLS = {"tavily_search", "webrequest", "unstructured_parse"}
@@ -282,7 +287,7 @@ def ask(title, category=None, detail=""):
             auto_until[category] = time.time() + 300
         audit("approve", f"{a}: {title}")
         return a in ("yes", "always", "5min")
-    
+
     print("\n" + title)
     if detail:
         print(trunc(detail, 3000))
@@ -605,7 +610,7 @@ def kill_all_procs():
 def t_run_command(command, timeout=CMD_TIMEOUT):
     if DRY_RUN:
         return f"DRY RUN: would run `{command}`"
-    
+
     cmds_to_check = [command]
     for m in re.finditer(r'(?:rish|(?:ba|z|da|k|a)?sh)\s+-[a-zA-Z]*c\s+(["\'])(.*?)\1', command):
         cmds_to_check.append(m.group(2))
@@ -635,12 +640,12 @@ def t_run_command(command, timeout=CMD_TIMEOUT):
 
     if not ask("Run command", "cmd", command):
         return "User denied this command."
-        
+
     try:
         safe_timeout = max(1, min(int(timeout or CMD_TIMEOUT), 300))
     except (ValueError, TypeError):
         safe_timeout = CMD_TIMEOUT
-        
+
     rc, o, e = run_proc(command, True, safe_timeout)
     if rc is None:
         return redact(f"{e}\n{trunc(o)}")
@@ -658,26 +663,26 @@ def t_termux_api(command, args=None):
         return f"Not allowed. Allowed: {', '.join(sorted(TERMUX_API_OK))}"
     if not shutil.which(command):
         return f"{command} not found. Install: pkg install termux-api (and the Termux:API app)."
-        
+
     if isinstance(args, str):
         args = [args]
     elif not isinstance(args, list):
         args = []
     args = [str(a) for a in args]
-    
+
     if command in ("termux-clipboard-get", "termux-clipboard-set"):
         if not ask(f"Allow {command}?", "clipboard", f"Command: {command} {' '.join(args)}"):
             return "User denied clipboard access."
     elif command not in TERMUX_API_READONLY and not ask("Termux API", "cmd", f"{command} {' '.join(args)}"):
         return "User denied."
-        
+
     if command == "termux-notification":
         if time.time() - _last_notify < 10: return "Notification rate limited."
         _last_notify = time.time()
     elif command == "termux-tts-speak":
         if time.time() - _last_tts < 10: return "TTS rate limited."
         _last_tts = time.time()
-        
+
     if DRY_RUN:
         return f"DRY RUN: would call {command} {' '.join(args)}"
     rc, o, e = run_proc([command] + args, False, 30)
@@ -1058,11 +1063,48 @@ def execute(call):
 
 # ---------------------------------------------------------------- providers
 OPENAI = {
-    "GROQ": {"url": "https://api.groq.com/openai/v1/chat/completions", "model": "openai/gpt-oss-120b", "extra": {"reasoning_effort": "medium"}},
-    "MISTRAL": {"url": "https://api.mistral.ai/v1/chat/completions", "model": "codestral-latest", "extra": {}},
-    "OPENROUTER": {"url": "https://openrouter.ai/api/v1/chat/completions", "model": "meta-llama/llama-3.3-70b-instruct", "extra": {}},
+    "GROQ": {
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "model": "openai/gpt-oss-120b",
+        "extra": {"reasoning_effort": "medium"},
+    },
+    "MISTRAL": {
+        "url": "https://api.mistral.ai/v1/chat/completions",
+        "model": "codestral-latest",
+        "extra": {},
+    },
+    "OPENROUTER": {
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "model": "meta-llama/llama-3.3-70b-instruct",
+        "extra": {},
+    },
+    "ZAI": {
+        "url": "https://api.z.ai/api/paas/v4/chat/completions",
+        "model": "glm-4.5-flash",
+        "extra": {"temperature": 1.0},
+        "headers": {"Accept-Language": "en-US,en"},
+    },
+    "BAZAARLINK": {
+        "url": "https://api.bazaarlink.ai/v1/chat/completions",
+        "model": "glyph-cluster",
+        "extra": {},
+    },
+    "UNOROUTER": {
+        "url": "https://api.unorouter.com/v1/chat/completions",
+        "model": "allam-2-7b:free",
+        "extra": {},
+    },
+    "AIHUBMIX": {
+        "url": "https://aihubmix.com/v1/chat/completions",
+        "model": "agents-a1-free",
+        "extra": {"max_tokens": 4096, "stream": False},
+    },
 }
-ROTATION = ["GROQ", "MISTRAL", "GEMINI_PRO_1", "GEMINI_PRO_2", "GEMINI_FREE_1", "GEMINI_FREE_2", "OPENROUTER"]
+ROTATION = [
+    "GROQ", "MISTRAL", "GEMINI_PRO_1", "GEMINI_PRO_2",
+    "GEMINI_FREE_1", "GEMINI_FREE_2", "ZAI", "OPENROUTER",
+    "AIHUBMIX", "BAZAARLINK", "UNOROUTER",
+]
 GEMINI_MODELS = [m.strip() for m in os.environ.get("GEMINI_MODELS", "").split(",") if m.strip()] or ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.7-flash"]
 SERVICES = {
     "auto": ("Auto (round-robin)", ROTATION),
@@ -1071,6 +1113,10 @@ SERVICES = {
     "gemini_pro": ("Gemini Pro", ["GEMINI_PRO_1", "GEMINI_PRO_2"]),
     "gemini_free": ("Gemini Free", ["GEMINI_FREE_1", "GEMINI_FREE_2"]),
     "openrouter": ("OpenRouter", ["OPENROUTER"]),
+    "zai": ("Z.AI", ["ZAI"]),
+    "bazaarlink": ("BazaarLink", ["BAZAARLINK"]),
+    "unorouter": ("UnoRouter", ["UNOROUTER"]),
+    "aihubmix": ("AIHubMix", ["AIHUBMIX"]),
 }
 API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 NET_ERRORS = (urllib.error.URLError, TimeoutError, OSError, ValueError, http.client.HTTPException)
@@ -1133,7 +1179,8 @@ def window(history):
     if not history: return history
     a = max((i for i, m in enumerate(history) if m["role"] == "user" and any("text" in p and not p.get("internal") for p in m["parts"])), default=0)
     start = max(0, len(history) - WINDOW_SIZE)
-    while start > 0 and any("functionResponse" in p for p in history[start]["parts"]): start -= 1
+    while start > 0 and (any("functionResponse" in p for p in history[start]["parts"]) or (a < start and history[start].get("role") == "user")):
+        start -= 1
     if a < start: return history[a:a + 1] + history[start:]
     return history[start:]
 
@@ -1151,7 +1198,7 @@ def sanitize_for_switch(contents):
             else: p.pop("thoughtSignature", None)
     return c
 
-def to_openai(contents):
+def to_openai(contents, allow_tools=True):
     msgs, pend, n = [{"role": "system", "content": system_prompt()}], [], 0
     for m in contents:
         parts = m.get("parts", [])
@@ -1164,15 +1211,27 @@ def to_openai(contents):
                     pend.append(cid)
                     fc = p["functionCall"]
                     calls.append({"id": cid, "type": "function", "function": {"name": fc["name"], "arguments": json.dumps(fc.get("args") or {})}})
-            msg = {"role": "assistant", "content": "".join(p.get("text", "") for p in parts if not p.get("thought"))}
-            if calls: msg["tool_calls"] = calls
-            msgs.append(msg)
+            text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+            if allow_tools:
+                msg = {"role": "assistant", "content": text}
+                if calls: msg["tool_calls"] = calls
+                msgs.append(msg)
+            else:
+                call_txt = "\n".join(f"[Tool call: {c['function']['name']}({c['function']['arguments']})]" for c in calls)
+                combined = "\n".join(x for x in (text, call_txt) if x)
+                if combined:
+                    msgs.append({"role": "assistant", "content": combined})
         else:
             for p in parts:
                 if "functionResponse" in p:
                     r = p["functionResponse"]
                     v = r.get("response", {})
-                    msgs.append({"role": "tool", "tool_call_id": pend.pop(0) if pend else "c00000000", "name": r["name"], "content": str(v.get("result", v))})
+                    res_str = str(v.get("result", v))
+                    if allow_tools:
+                        msgs.append({"role": "tool", "tool_call_id": pend.pop(0) if pend else "c00000000", "name": r["name"], "content": res_str})
+                    else:
+                        if pend: pend.pop(0)
+                        msgs.append({"role": "user", "content": f"[Tool result ({r['name']})]: {res_str}"})
             text = "".join(p.get("text", "") for p in parts if "text" in p)
             if text: msgs.append({"role": "user", "content": text})
     return msgs
@@ -1197,8 +1256,12 @@ def from_openai(data):
     if c: parts.append({"text": c})
     for tc in msg.get("tool_calls") or []:
         f = tc.get("function", {})
-        try: args = json.loads(f.get("arguments") or "{}")
-        except ValueError: args = {}
+        raw_args = f.get("arguments")
+        if isinstance(raw_args, dict):
+            args = raw_args
+        else:
+            try: args = json.loads(raw_args or "{}")
+            except (ValueError, TypeError): args = {}
         parts.append({"functionCall": {"name": (f.get("name") or "").split("<|")[0].strip(), "args": args}})
     out = {"candidates": [{"content": {"role": "model", "parts": parts}, "finishReason": ch.get("finish_reason")}]}
     if isinstance(data.get("usage"), dict): out["usageMetadata"] = {"totalTokenCount": data["usage"].get("total_tokens", 0)}
@@ -1220,14 +1283,43 @@ def _curl(url, payload, headers, timeout):
     if code.strip() != "200": raise ApiError(int(code) if code.strip().isdigit() else 0, body or e)
     return json.loads(body)
 
+def _openai_request(url, payload, headers, timeout=60):
+    try:
+        return _http(url, payload, headers, timeout)
+    except ApiError as e:
+        is_key_err = re.search(r"API key|API_KEY|PERMISSION_DENIED|expired|billing|invalid.*key|unauthorized", e.text, re.I)
+        if e.code == 403 and not is_key_err and shutil.which("curl"):
+            return _curl(url, payload, headers, timeout)
+        raise
+
 def post_openai(name, model, contents):
     cfg = OPENAI[name]
-    payload = {"model": model, "messages": to_openai(contents), "tools": openai_tools(), "tool_choice": "auto", **cfg["extra"]}
-    headers = {"Content-Type": "application/json", "Authorization": "Bearer " + env(name), "User-Agent": UA}
-    try: data = _http(cfg["url"], payload, headers, 60)
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + env(name),
+        "User-Agent": UA,
+        **cfg.get("headers", {}),
+    }
+    payload = {
+        "model": model,
+        "messages": to_openai(contents, allow_tools=True),
+        "tools": openai_tools(),
+        "tool_choice": "auto",
+        **cfg.get("extra", {}),
+    }
+    try:
+        data = _openai_request(cfg["url"], payload, headers, 60)
     except ApiError as e:
-        if e.code == 403 and re.search(r"1010|1020|cloudflare", e.text, re.I) and shutil.which("curl"): data = _curl(cfg["url"], payload, headers, 60)
-        else: raise
+        is_key_err = re.search(r"API key|API_KEY|PERMISSION_DENIED|expired|billing|invalid.*key|unauthorized", e.text, re.I)
+        if e.code in (400, 422, 501) and not is_key_err:
+            fallback_payload = {
+                "model": model,
+                "messages": to_openai(contents, allow_tools=False),
+                **cfg.get("extra", {}),
+            }
+            data = _openai_request(cfg["url"], fallback_payload, headers, 60)
+        else:
+            raise
     return from_openai(data)
 
 def post_gemini(name, model, contents):
@@ -1271,9 +1363,14 @@ def record_tokens(name, resp):
 def _post_no_tools(name, model, contents):
     if name in OPENAI:
         cfg = OPENAI[name]
-        payload = {"model": model, "messages": to_openai(contents), **cfg["extra"]}
-        headers = {"Content-Type": "application/json", "Authorization": "Bearer " + env(name), "User-Agent": UA}
-        data = _http(cfg["url"], payload, headers, 60)
+        payload = {"model": model, "messages": to_openai(contents, allow_tools=False), **cfg.get("extra", {})}
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + env(name),
+            "User-Agent": UA,
+            **cfg.get("headers", {}),
+        }
+        data = _openai_request(cfg["url"], payload, headers, 60)
         return from_openai(data)
     payload = {"systemInstruction": {"parts": [{"text": system_prompt()}]}, "contents": contents}
     return _http(f"{API_BASE}/models/{model}:generateContent", payload, {"Content-Type": "application/json", "x-goog-api-key": env(name)}, 120)
@@ -1304,7 +1401,8 @@ def call_llm(history, continuation=False, no_tools=False, no_rotate=False):
             for ignore_bench in passes:
                 for name in names:
                     if name in dead: continue
-                    models = ([OPENAI[name]["model"]] if name in OPENAI else GEMINI_MODELS[GEMINI_MODELS.index(gemini_model):])
+                    g_idx = GEMINI_MODELS.index(gemini_model) if gemini_model in GEMINI_MODELS else 0
+                    models = ([OPENAI[name]["model"]] if name in OPENAI else GEMINI_MODELS[g_idx:])
                     for model in models:
                         if not ignore_bench and bench.get((name, model), 0) > time.time(): continue
                         tried = True
@@ -1403,22 +1501,38 @@ def repo_map(max_files=150):
 def maybe_summarize(history):
     global summary
     if len(history) <= CFG["summarize_after"]: return
-    first_user_idx = next((i for i, m in enumerate(history) if m["role"] == "user" and any("text" in p and not p.get("internal") for p in m["parts"])), None)
-    cut = max(1, len(history) // 2)
-    if first_user_idx is not None and first_user_idx < cut: cut = first_user_idx + 1
-    if cut <= 1: return
-    chunk = history[1:cut]
+    user_indices = [
+        i for i, m in enumerate(history)
+        if m.get("role") == "user" and any("text" in p and not p.get("internal") for p in m.get("parts", []))
+    ]
+    last_user_idx = user_indices[-1] if user_indices else 0
+    target = max(1, len(history) // 2)
+    cut = None
+    for idx in reversed(user_indices):
+        if 0 < idx <= target and idx <= last_user_idx:
+            cut = idx
+            break
+    if cut is not None:
+        chunk = history[:cut]
+        del_start = 0
+    else:
+        cut = min(target, last_user_idx) if last_user_idx > 1 else target
+        while cut > 1 and history[cut].get("role") != "model":
+            cut -= 1
+        if cut <= 1: return
+        chunk = history[1:cut]
+        del_start = 1
     try:
         dumped = json.dumps(chunk)
         if len(dumped) > 9000:
-            dumped = dumped.encode('utf-8')[:9000].decode('utf-8', errors='ignore')
+            dumped = dumped.encode("utf-8")[:9000].decode("utf-8", errors="ignore")
         prompt = "Compress the following agent conversation into a dense note of at most 180 words. Keep file paths, decisions, constraints, exact commands, and unresolved issues.\n" + dumped
         resp = call_llm([{"role": "user", "parts": [{"text": prompt}]}], continuation=True, no_tools=True, no_rotate=True)
         parts = (resp.get("candidates") or [{}])[0].get("content", {}).get("parts", [])
         text = "".join(p.get("text", "") for p in parts if p.get("text")).strip()
         if text:
             summary = (summary + "\n" + text).strip()[-2500:]
-            del history[1:cut]
+            del history[del_start:cut]
     except Exception as e: log_line(f"summarize failed: {e}")
 
 def git_available(): return shutil.which("git") is not None
@@ -1701,6 +1815,7 @@ def run_turn(user_text):
         del history[start_len:]
     except Exception as e:
         del history[start_len:]
+        out("err", text=str(e))
         log_line(f"turn error: {e}")
     finally:
         save_session()

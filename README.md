@@ -2,7 +2,13 @@
 
 Termux Agent is a local coding and phone automation assistant built for Android and Termux. It runs on the Python standard library with no external pip packages required, and ships as two files: `termux_agent.py` for the backend and CLI, and `index.html` for the browser interface.
 
-It connects to Gemini, Groq, Mistral, and OpenRouter, gives the model a sandboxed set of file, shell, web, and Android tools, and puts an explicit approval step in front of every file change, command, call, or message.
+It connects to Gemini, Groq, Mistral, OpenRouter, Z.AI, BazaarLink, UnoRouter, and AIHubMix, gives the model a sandboxed set of file, shell, web, and Android tools, and puts an explicit approval step in front of every file change, command, call, or message.
+
+
+| | | | |
+| :---: | :---: | :---: | :---: |
+| Home<br>![Home](Images/home.png) | Models<br> ![Settings 1](Images/settings1.png) | Permissions <br> ![Settings 2](Images/settings2.jpg) | Logs & Actions <br>![Settings 3](Images/settings3.jpg) |
+| Weather<br>![Weather](Images/weather.png) | Call<br>![Call](Images/call.png) | Cloning a repo<br>![Clone](Images/clone.png) | With Shizuku<br>![Apks](Images/apks.jpg) |
 
 | | | | |
 | :---: | :---: | :---: | :---: |
@@ -44,12 +50,26 @@ GEMINI_FREE_2=
 MISTRAL=
 GROQ=
 OPENROUTER=
-NVIDIA=
+ZAI=
+BAZAARLINK=
+UNOROUTER=
+AIHUBMIX=
 TAVILY=
 UNSTRUCTURED=
 ```
 
-`TAVILY` is optional and only used by the `tavily_search` tool. `UNSTRUCTURED` is optional and only used by `unstructured_parse` to extract text from PDFs, Word documents, or images.
+* **Supported LLM Providers**:
+  * **Gemini** (`GEMINI_PRO_*`, `GEMINI_FREE_*`): Google Gemini models (`gemini-3.5-flash-lite`, `gemini-3.5-flash`, `gemini-3.6-flash`, `gemini-3.7-flash`).
+  * **Groq** (`GROQ`): `openai/gpt-oss-120b` via Groq's high-throughput OpenAI endpoint.
+  * **Mistral** (`MISTRAL`): `codestral-latest` for code synthesis and editing.
+  * **OpenRouter** (`OPENROUTER`): `meta-llama/llama-3.3-70b-instruct`.
+  * **Z.AI** (`ZAI`): `glm-4.5-flash` at `https://api.z.ai/api/paas/v4/chat/completions` (with `Accept-Language: en-US,en`).
+  * **BazaarLink** (`BAZAARLINK`): `glyph-cluster` at `https://api.bazaarlink.ai/v1/chat/completions`.
+  * **UnoRouter** (`UNOROUTER`): `allam-2-7b:free` at `https://api.unorouter.com/v1/chat/completions`.
+  * **AIHubMix** (`AIHUBMIX`): `agents-a1-free` at `https://aihubmix.com/v1/chat/completions`.
+* **Auxiliary Keys (Optional)**:
+  * `TAVILY`: Used by `tavily_search` for web grounding.
+  * `UNSTRUCTURED`: Used by `unstructured_parse` to extract text from PDFs, Word docs, and images.
 
 ## Running the Agent
 
@@ -77,8 +97,8 @@ When you send a message in the Web UI or CLI, `run_turn()` runs a step loop (up 
 
 1. **Prompt and context assembly**: Before calling a model, `system_prompt()` builds the current workspace state. It includes the sandbox root path, active data permissions, Shizuku status, the last 4,000 characters of `skills.md` (if present in the project root), the running conversation summary, any pinned files (up to 8 files, capped at 10,000 characters total), and an automatically generated repository map.
 2. **Repository map caching**: `repo_map()` walks the project (skipping `.git`, `node_modules`, `.venv`, `dist`, `build`, caches, and backup directories) and extracts top-level Python and JavaScript/TypeScript function and class names from up to 150 files under 400 KB. The result is cached in memory and refreshed asynchronously on a 5-second debounce timer whenever files change.
-3. **Sliding context window**: `window()` sends the most recent `window_size` messages (default 16), backs up the start pointer if needed so tool responses are never orphaned from their tool calls, and always keeps the original user message from the start of the conversation anchored at index 0.
-4. **Provider call and tool parsing**: `call_llm()` sends the request to the active provider. OpenAI-compatible providers (`GROQ`, `MISTRAL`, `OPENROUTER`) and Google Gemini models use a shared internal message format. When switching between models mid-session, `sanitize_for_switch()` strips incompatible Gemini thought signatures so the next model does not reject the history.
+3. **Sliding context window**: `window()` sends the most recent `window_size` messages (default 16), backs up the start pointer if needed so tool responses are never orphaned from their tool calls and strict user/model role alternation is maintained, and always keeps the initial user message anchored.
+4. **Provider call and tool parsing**: `call_llm()` sends the request to the active provider. OpenAI-compatible providers (`GROQ`, `MISTRAL`, `OPENROUTER`, `ZAI`, `BAZAARLINK`, `UNOROUTER`, `AIHUBMIX`) and Google Gemini models share an internal translation pipeline. If a provider endpoint rejects tool-call definitions (e.g. models without native function calling), the agent transparently retries without `tools` in standard chat mode. When switching between models mid-session, `sanitize_for_switch()` strips incompatible thought signatures so the next model does not reject the history.
 5. **Pre-write checkpoint**: The first time in a turn that the model calls any write tool (`write_file`, `edit_file`, `append_file`, `apply_patch`, `move_path`, `delete_path`, `make_dir`, or `run_command`), the agent takes a full checkpoint of the working directory before executing the tool.
 6. **Tool execution and approval**: Each tool call is routed through `execute()`. Read-only tools run immediately. Mutating tools pause and wait for your approval in the Web UI or terminal. Tool outputs are redacted for secrets and truncated to `max_result_chars` (default 3,000 characters) before being appended to the conversation history.
 7. **Syntax verification and self-healing**: Once the model finishes its tool calls and produces a final reply, the agent runs `verify_file()` on every file modified or patched during the turn:
@@ -87,20 +107,21 @@ When you send a message in the Web UI or CLI, `run_turn()` runs a step loop (up 
    * `.json`: `json.loads()`
    * `.sh`: `bash -n` (if Bash is installed)
    If any file has a syntax error, the error output is injected back into the conversation as an internal prompt and the loop continues so the model can fix its mistake. If verification still fails after `max_heal` attempts (default 3), the agent aborts the turn and rolls the working tree back to the pre-turn checkpoint.
-8. **Summarization and persistence**: When the conversation history grows past `summarize_after` messages (default 24), the older half of the history is compressed into a 180-word summary note by the model (without rotating providers) and trimmed from the active list. The session is saved to `~/.config/termux_agent/session.json`, and if the turn took at least 25 seconds, `termux-notification` posts a completion alert.
+8. **Summarization and persistence**: When the conversation history grows past `summarize_after` messages (default 24), older completed turns are compressed into a 180-word summary note by the model (without rotating providers) and trimmed from the active list. The session is saved to `~/.config/termux_agent/session.json`, and if the turn took at least 25 seconds, `termux-notification` posts a completion alert.
 9. **Step limit handling**: If the agent reaches `max_steps` without finishing, it stops cleanly and pushes a `need_continue` event so the Web UI displays a one-tap **Continue** button.
 
 ## Provider Rotation and Failover
 
 In `auto` mode, the agent rotates across all configured keys in this order:
 
-`GROQ` -> `MISTRAL` -> `GEMINI_PRO_1` -> `GEMINI_PRO_2` -> `GEMINI_FREE_1` -> `GEMINI_FREE_2` -> `OPENROUTER`
+`GROQ` -> `MISTRAL` -> `GEMINI_PRO_1` -> `GEMINI_PRO_2` -> `GEMINI_FREE_1` -> `GEMINI_FREE_2` -> `ZAI` -> `OPENROUTER` -> `AIHUBMIX` -> `BAZAARLINK` -> `UNOROUTER`
 
 * **Turn-based rotation**: Rotation counts user turns rather than individual tool-call steps within a turn (`rotate_every`, default 2 turns). Internal calls like conversation summarization and the `Explain` button do not advance the rotation counter.
-* ** Gemini model fallback**: For Gemini keys, if the selected model (such as `gemini-3.5-flash-lite`) hits a rate limit, the agent steps through the remaining models in `GEMINI_MODELS` on the same key before moving to the next key.
+* **Gemini model fallback**: For Gemini keys, if the selected model (such as `gemini-3.5-flash-lite`) hits a rate limit, the agent steps through the remaining models in `GEMINI_MODELS` on the same key before moving to the next key.
 * **Cooldowns and benching**: A transient failure or HTTP 429 puts that `(provider, model)` pair on a 60-second cooldown (`short_cooldown`). Hitting `bench_after` consecutive failures (default 2) benches the pair for 10 minutes (`bench_secs`). While one provider is cooling down, `call_llm()` immediately tries the next available provider in the list without waiting. If every configured provider is on cooldown, the agent waits for the soonest cooldown timer to expire and retries.
 * **Dead keys**: HTTP 401, 402, or explicit invalid-key/billing errors mark the key as `invalid` for the rest of the session until you edit `.env` and click **Reload .env**.
-* **Cloudflare fallback**: If an OpenAI-compatible endpoint returns an HTTP 403 Cloudflare block (error 1010/1020) to Python's `urllib`, the agent automatically retries the request through the system `curl` binary.
+* **Cloudflare & WAF fallback**: If an OpenAI-compatible endpoint returns an HTTP 403 Cloudflare challenge or block to Python's `urllib`, the agent automatically retries the request through the system `curl` binary.
+* **Tool-less compatibility mode**: If a custom model or free router returns HTTP 400, 422, or 501 rejecting `tools` schemas, the request falls back seamlessly to standard chat completions so you can still converse with the model.
 
 ## Tools
 
@@ -149,7 +170,7 @@ Every `write_file`, `edit_file`, `append_file`, `apply_patch`, `delete_path`, `m
 1. **Filesystem Sandbox (`safe()`)**: Every file path is resolved with `os.path.realpath()` and checked with `os.path.commonpath()` to ensure it stays inside `ROOT`. Symlinks pointing outside `ROOT` are rejected. Even inside `ROOT`, the agent blocks access to its own `.env`, sensitive filenames (`.env`, `keys.json`, `id_rsa`, `id_ed25519`, `id_ecdsa`, `.bash_history`, `.zsh_history`, `.netrc`, `.pgpass`), and sensitive directories (`.ssh`, `.config/termux_agent`, `.gnupg`, `.aws`, `.config/gcloud`).
 2. **Shell Command Filtering**: Before asking for approval, `t_run_command()` unwraps `rish -c` and shell `-c` (`sh -c`, `bash -c`, `zsh -c`, `dash -c`) arguments, checks both raw and quote/backslash-stripped versions of the command, blocks `.env` and sensitive file/directory references, and blocks destructive patterns (`rm -rf` on `/`, `~`, `$HOME`, `/sdcard`, `/storage`; `mkfs`; `dd if=`; fork bombs; raw block device redirects; `chmod -R 777 /`; `curl|sh` or `wget|sh`; `git push`; nested `sh -c`).
 3. **Stale-File Guard (`stale_check()`)**: Whenever `read_file` reads a file (or after an agent write), its SHA-256 digest is stored in `_read_hashes`. If you edit the file in another editor before the agent writes, edits, appends, or patches it, the hash check fails and the agent is forced to re-read the file before writing.
-4. **Secret and PII Redaction (`redact()`)**: All tool outputs, command stdout/stderr, file reads, search results, and web responses pass through `redact()`. It strips every key value present in `.env` (6+ characters), common API key formats (`sk-`, `gsk_`, `AIza`, `tvly-`, `hf_`, `ghp_`, `xox*`, `nvidia-`, `sk-or-v1-`), private key blocks, email addresses, and formatted phone numbers (while leaving plain 10 to 13 digit integers like Unix timestamps intact). Outbound tools (`tavily_search`, `webrequest`) refuse to send requests if `redact()` detects a secret in the query, URL, or body.
+4. **Secret and PII Redaction (`redact()`)**: All tool outputs, command stdout/stderr, file reads, search results, and web responses pass through `redact()`. It strips every key value present in `.env` (6+ characters), common API key formats (`sk-`, `gsk_`, `AIza`, `tvly-`, `hf_`, `ghp_`, `xox*`, `sk-or-v1-`), private key blocks, email addresses, and formatted phone numbers (while leaving plain 10 to 13 digit integers like Unix timestamps intact). Outbound tools (`tavily_search`, `webrequest`) refuse to send requests if `redact()` detects a secret in the query, URL, or body.
 5. **Contact Vault (`VAULT`)**: Contact numbers never enter the model context. `find_contact` stores `{name, number}` in an in-memory dictionary keyed by a monotonic counter (`[CONTACT_1]`, `[CONTACT_2]`, and so on, up to `vault_max_entries` = 200) and only returns the placeholder and name to the model. When `call_contact` or `send_sms` is invoked, the placeholder is resolved locally and the real number is displayed only on your approval card.
 6. **Data Access Permissions**: Access to `contacts`, `sms`, `location`, and `call_log` defaults to `never`. In Settings, each category can be set to `never`, `ask`, or `allow`.
 7. **Approval Granularity and Explain**: Approval cards offer four choices: **Deny**, **Approve** (once), **5 min** (auto-approve that category for 5 minutes), and **Always** (toggle session auto-approve for that category). Tapping **Explain** sends the title and diff/command to the model on a side channel (`no_tools=True`, `no_rotate=True`) and displays a plain-language summary of what the action will do before you approve it.
@@ -162,13 +183,14 @@ The Web UI (`index.html`) uses vanilla JavaScript and CSS with zero external dep
 
 * **Mobile View (`< 860px`)**: Single-column layout tailored for one-handed phone use, with safe-area inset padding, `visualViewport` keyboard resize handling, a top menu to switch between **Chat** and **Settings**, an inline plan checklist (`#todos`), and a bottom approval card with syntax-highlighted unified diffs.
 * **Tablet and Desktop View (`>= 860px`)**: Automatically switches via CSS Grid to a two-column split layout (up to `1320px` wide). The left pane holds the chat feed, plan, approval card, and composer; the right sidebar keeps the full Settings and Session Inspector panel open at all times so provider token counters, session changes, checkpoints, pinned files, and the outbound audit log stay visible while you chat.
+* **Hold-to-Copy Prompts**: Pressing and holding (long-pressing for ~450ms or right-clicking) any sent prompt bubble in the chat feed highlights the message and reveals a **Copy** button to quickly copy the prompt text to your clipboard.
 
 ## CLI Commands
 
 When running with `--cli`, the following slash commands are available at the `>` prompt:
 
 ```text
-/model <service> [gemini_model]   Switch active service (auto, groq, mistral, gemini_pro, gemini_free, openrouter)
+/model <service> [gemini_model]   Switch active service (auto, groq, mistral, gemini_pro, gemini_free, openrouter, zai, bazaarlink, unorouter, aihubmix)
 /models                           Show available services and configured key counts
 /undo                             Revert the last file or directory change from the session journal
 /clear                            Clear conversation history and summary
